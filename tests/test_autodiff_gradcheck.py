@@ -139,3 +139,83 @@ def test_gradient_accumulation_shared_subgraph():
 
     expected = 4.0 * x_data
     assert_close(x.grad, expected)
+
+
+def test_exp_gradcheck():
+    rng = np.random.default_rng(7)
+    x_data = rng.normal(size=(3, 5))
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.exp().sum()
+    out.backward()
+
+    fn_x = lambda v: np.exp(v).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)
+
+
+def test_log_gradcheck():
+    rng = np.random.default_rng(8)
+    # Keep values safely positive for numerical stability around log.
+    x_data = np.abs(rng.normal(size=(4, 4))) + 0.5
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.log().sum()
+    out.backward()
+
+    fn_x = lambda v: np.log(v).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)
+
+
+def test_pow_gradcheck():
+    rng = np.random.default_rng(9)
+    x_data = np.abs(rng.normal(size=(6,))) + 0.2
+    exponent = 2.5
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.pow(exponent).sum()
+    out.backward()
+
+    fn_x = lambda v: (v**exponent).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)
+
+
+def test_reshape_gradcheck():
+    rng = np.random.default_rng(10)
+    x_data = rng.normal(size=(2, 3, 4))
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.reshape(4, 6).sum()
+    out.backward()
+
+    fn_x = lambda v: v.reshape(4, 6).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)
+
+
+def test_mean_axis_gradcheck():
+    rng = np.random.default_rng(11)
+    x_data = rng.normal(size=(3, 4, 5))
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.mean(axis=1).sum()
+    out.backward()
+
+    fn_x = lambda v: v.mean(axis=1).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)
+
+
+def test_sum_axis_keepdims_gradcheck():
+    rng = np.random.default_rng(12)
+    x_data = rng.normal(size=(3, 2, 4))
+
+    x = Tensor(x_data.copy(), requires_grad=True)
+    out = x.sum(axis=2, keepdims=True).sum()
+    out.backward()
+
+    fn_x = lambda v: v.sum(axis=2, keepdims=True).sum()
+    nx = numerical_grad_scalar(fn_x, x_data.copy())
+    assert_close(x.grad, nx)

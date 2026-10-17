@@ -63,5 +63,13 @@ Evidence fields written by the sweep include:
 - dense MACs per example vs sparse MACs per example
 - dense forward latency vs sparse-aware forward latency
 
+Generated artifacts (committed):
+- `results/pruning_sweep.csv`
+- `results/pruning_summary.csv`
+- `plots/sparsity_accuracy_pareto.png`
+
+Falsifiable claim (from `results/pruning_summary.csv`):
+- At target sparsity `0.90` (3 seeds), magnitude pruning reached mean test accuracy `0.9817 ± 0.0002`, while saliency pruning reached `0.9751 ± 0.0007`; delta (saliency - magnitude) is `-0.0066`.
+
 Note:
 - The sparse-aware forward path in this repository is an explicit NumPy implementation used for honest work accounting. It may reduce MACs and active parameters while still being slower wall-clock than dense BLAS matmul at this scale.
