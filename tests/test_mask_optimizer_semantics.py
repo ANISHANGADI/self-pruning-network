@@ -68,3 +68,28 @@ def test_masked_forward_blocks_gradient_flow_on_pruned_weights():
     assert grad[1, 0] == 0.0
     assert grad[0, 0] != 0.0
     assert grad[1, 1] != 0.0
+
+
+def test_revived_update_uses_reset_moments_and_global_clock():
+    param = Parameter(np.array([1.0, 2.0]), use_mask=True)
+    optimizer = Adam([param], lr=0.1)
+    param.tensor.grad = np.array([0.5, 0.25])
+    optimizer.step()
+    param.set_mask(np.array([1.0, 0.0]))
+    for _ in range(2):
+        param.tensor.grad = np.array([0.5, 10.0])
+        optimizer.step()
+    state = optimizer.state[id(param)]
+    previous_active_m = state["m"][0]
+    state["m"][1], state["v"][1] = 123.0, 456.0
+    param.set_mask(np.ones(2))
+    param.tensor.grad = np.array([0.5, 0.2])
+    optimizer.step()
+    expected_m = 0.1 * 0.2
+    expected_v = 0.001 * 0.2 ** 2
+    expected_weight = -0.1 * (expected_m / (1 - 0.9 ** 4)) / (np.sqrt(expected_v / (1 - 0.999 ** 4)) + 1e-8)
+    assert optimizer.t == 4
+    np.testing.assert_allclose(state["m"], [0.9 * previous_active_m + 0.1 * 0.5, expected_m])
+    np.testing.assert_allclose(state["v"][1], expected_v)
+    np.testing.assert_allclose(param.data[1], expected_weight)
+    assert not np.isclose(param.data[1], -0.1)

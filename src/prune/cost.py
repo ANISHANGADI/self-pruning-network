@@ -5,8 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from engine.tensor import Tensor
-from nn.modules import Linear, MLP
+from nn.modules import Linear, MLP, ReLU
 
 
 @dataclass
@@ -49,6 +48,26 @@ def estimate_macs_per_example(model: MLP) -> tuple[int, int]:
     return dense, sparse
 
 
+def dense_forward_numpy(model: MLP, x: np.ndarray) -> np.ndarray:
+    activ = x
+    if not np.isfinite(activ).all():
+        raise FloatingPointError("Non-finite input passed to dense forward")
+    for layer in model.net.layers:
+        if isinstance(layer, Linear):
+            weight = layer.weight.data
+            if layer.weight.mask is not None:
+                weight = weight * layer.weight.mask
+            with np.errstate(all="ignore"):
+                activ = activ @ weight + layer.bias.data
+            if not np.isfinite(activ).all():
+                raise FloatingPointError("Non-finite values produced in dense forward")
+        elif isinstance(layer, ReLU):
+            activ = np.maximum(activ, 0.0)
+        else:
+            raise TypeError("Unsupported inference layer")
+    return activ
+
+
 def sparse_forward_numpy(model: MLP, x: np.ndarray) -> np.ndarray:
     activ = x
     if not np.isfinite(activ).all():
@@ -77,9 +96,10 @@ def sparse_forward_numpy(model: MLP, x: np.ndarray) -> np.ndarray:
             if not np.isfinite(out).all():
                 raise FloatingPointError("Non-finite values produced in sparse forward")
             activ = out
-        else:
-            # ReLU layer in this project.
+        elif isinstance(layer, ReLU):
             activ = np.maximum(activ, 0.0)
+        else:
+            raise TypeError("Unsupported inference layer")
 
     return activ
 
@@ -88,13 +108,13 @@ def benchmark_forward_ms(model: MLP, x: np.ndarray, repeats: int = 20) -> tuple[
     if repeats <= 0:
         raise ValueError("repeats must be >= 1")
 
-    # Warmup
-    _ = model(Tensor(x, requires_grad=False))
-    _ = sparse_forward_numpy(model, x)
+    dense_output = dense_forward_numpy(model, x)
+    sparse_output = sparse_forward_numpy(model, x)
+    np.testing.assert_allclose(sparse_output, dense_output, rtol=1e-10, atol=1e-10)
 
     t0 = time.perf_counter()
     for _ in range(repeats):
-        _ = model(Tensor(x, requires_grad=False))
+        _ = dense_forward_numpy(model, x)
     dense_ms = (time.perf_counter() - t0) * 1000.0 / repeats
 
     t1 = time.perf_counter()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_FLOOR
 
 import numpy as np
 
@@ -57,7 +58,30 @@ def _importance_for_param(param: Parameter, criterion: str) -> np.ndarray:
     raise ValueError(f"Unsupported pruning criterion: {criterion}")
 
 
-def apply_global_pruning_step(params: list[Parameter], criterion: str, target_sparsity: float) -> PruneStats:
+def active_budget(total: int, target_sparsity: float) -> int:
+    if total < 0 or not (0.0 <= target_sparsity <= 1.0):
+        raise ValueError("Invalid total or target sparsity")
+    return int(((Decimal(1) - Decimal(str(target_sparsity))) * total).to_integral_value(rounding=ROUND_FLOOR))
+
+
+def pruning_events(num_batches: int, start_epoch: int, end_epoch: int, epochs: int, interval: int) -> tuple[int, int]:
+    if num_batches < 1 or interval < 1 or not (1 <= start_epoch <= end_epoch <= epochs):
+        raise ValueError("Require positive batches/interval and 1 <= prune start <= prune end <= epochs")
+    eligible = (end_epoch - start_epoch + 1) * num_batches
+    return (eligible + interval - 1) // interval, eligible
+
+
+def capture_importance(params: list[Parameter], criterion: str) -> dict[int, np.ndarray]:
+    return {id(param): _importance_for_param(param, criterion).copy() for param in masked_parameters(params)}
+
+
+def assert_pruning_budget(params: list[Parameter], target_sparsity: float) -> None:
+    _, active, total = sparsity_from_params(params)
+    if active > active_budget(total, target_sparsity):
+        raise RuntimeError("Final active connection count exceeds pruning budget")
+
+
+def apply_global_pruning_step(params: list[Parameter], criterion: str, target_sparsity: float, scores: dict[int, np.ndarray] | None = None) -> PruneStats:
     if not (0.0 <= target_sparsity <= 1.0):
         raise ValueError("target_sparsity must be in [0, 1]")
 
@@ -66,7 +90,7 @@ def apply_global_pruning_step(params: list[Parameter], criterion: str, target_sp
         return PruneStats(target_sparsity, 0.0, 0, 0, 0)
 
     total_params = int(sum(np.prod(p.mask.shape) for p in masked if p.mask is not None))
-    desired_active = int(round((1.0 - target_sparsity) * total_params))
+    desired_active = active_budget(total_params, target_sparsity)
 
     active_coords: list[tuple[Parameter, np.ndarray, np.ndarray]] = []
     active_scores: list[np.ndarray] = []
@@ -80,9 +104,11 @@ def apply_global_pruning_step(params: list[Parameter], criterion: str, target_sp
         if active_idx.size == 0:
             continue
 
-        scores = _importance_for_param(p, criterion).ravel()[active_idx]
+        importance = _importance_for_param(p, criterion) if scores is None else scores[id(p)]
+        if importance.shape != p.data.shape or not np.isfinite(importance).all():
+            raise ValueError("Importance scores must match parameter shape and be finite")
         active_coords.append((p, active_idx, active_mask))
-        active_scores.append(scores)
+        active_scores.append(importance.ravel()[active_idx])
 
     if desired_active >= current_active:
         achieved, active, total = sparsity_from_params(params)

@@ -18,6 +18,7 @@ from engine.tensor import Tensor, log_softmax, nll_loss
 from nn.modules import MLP
 from optim.adam import Adam
 from prune.methods import apply_global_pruning_step, cubic_sparsity, sparsity_from_params
+from prune.methods import capture_importance, pruning_events, assert_pruning_budget
 from utils.training import evaluate_model, iterate_minibatches, set_seed
 
 
@@ -38,31 +39,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def _count_pruning_events(num_batches: int, prune_start_epoch: int, prune_end_epoch: int, epochs: int, prune_interval: int) -> int:
-    if prune_interval <= 0:
-        raise ValueError("prune_interval must be >= 1")
-    if prune_start_epoch > prune_end_epoch:
-        return 0
-
-    active_epochs = max(0, min(prune_end_epoch, epochs) - max(prune_start_epoch, 1) + 1)
-    eligible_steps = active_epochs * num_batches
-    if eligible_steps == 0:
-        return 0
-
-    return (eligible_steps + prune_interval - 1) // prune_interval
+    return pruning_events(num_batches, prune_start_epoch, prune_end_epoch, epochs, prune_interval)[0]
 
 
 def _count_eligible_steps(num_batches: int, prune_start_epoch: int, prune_end_epoch: int, epochs: int) -> int:
-    if prune_start_epoch > prune_end_epoch:
-        return 0
-
-    active_epochs = max(0, min(prune_end_epoch, epochs) - max(prune_start_epoch, 1) + 1)
-    return active_epochs * num_batches
+    return pruning_events(num_batches, prune_start_epoch, prune_end_epoch, epochs, 1)[1]
 
 
 def main() -> None:
     args = parse_args()
     if not (0.0 <= args.target_sparsity <= 1.0):
         raise ValueError("target_sparsity must be in [0, 1]")
+    if args.batch_size < 1 or args.lr <= 0:
+        raise ValueError("batch size and learning rate must be positive")
+    pruning_events(1, args.prune_start_epoch, args.prune_end_epoch, args.epochs, args.prune_interval)
 
     hidden_dims = [int(x.strip()) for x in args.hidden.split(",") if x.strip()]
     set_seed(args.seed)
@@ -104,20 +94,22 @@ def main() -> None:
             log_probs = log_softmax(logits, axis=1)
             loss = nll_loss(log_probs, yb)
             loss.backward()
+            scores = None
+            if args.prune_start_epoch <= epoch <= args.prune_end_epoch:
+                eligible_seen += 1
+                if eligible_seen % args.prune_interval == 0 or eligible_seen == total_eligible_steps:
+                    scores = capture_importance(model.parameters(), args.criterion)
             optimizer.step()
 
             train_losses.append(float(loss.data))
             train_logits.append(logits.data)
             train_targets.append(yb)
 
-            if args.prune_start_epoch <= epoch <= args.prune_end_epoch and total_prune_events > 0:
-                eligible_seen += 1
-                should_prune_now = (eligible_seen % args.prune_interval == 0) or (eligible_seen == total_eligible_steps)
-                if should_prune_now and prune_events_done < total_prune_events:
-                    prune_events_done += 1
-                    target = cubic_sparsity(prune_events_done, total_prune_events, args.target_sparsity)
-                    stats = apply_global_pruning_step(model.parameters(), args.criterion, target)
-                    pruned_this_epoch += stats.pruned_this_step
+            if scores is not None:
+                prune_events_done += 1
+                target = cubic_sparsity(prune_events_done, total_prune_events, args.target_sparsity)
+                stats = apply_global_pruning_step(model.parameters(), args.criterion, target, scores=scores)
+                pruned_this_epoch += stats.pruned_this_step
 
         train_loss = float(np.mean(train_losses))
         train_acc = float(np.mean(np.argmax(np.concatenate(train_logits, axis=0), axis=1) == np.concatenate(train_targets, axis=0)))
@@ -145,6 +137,7 @@ def main() -> None:
             f"pruned={pruned_this_epoch} time_s={dt:.2f}"
         )
 
+    assert_pruning_budget(model.parameters(), args.target_sparsity)
     test_loss, test_acc = evaluate_model(model, data["x_test"], data["y_test"])
     final_sparsity, final_active, final_total = sparsity_from_params(model.parameters())
     print(

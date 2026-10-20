@@ -19,6 +19,7 @@ from nn.modules import MLP
 from optim.adam import Adam
 from prune.cost import summarize_cost
 from prune.methods import apply_global_pruning_step, cubic_sparsity, sparsity_from_params
+from prune.methods import capture_importance, pruning_events, assert_pruning_budget
 from utils.training import evaluate_model, iterate_minibatches, set_seed
 
 
@@ -41,18 +42,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _count_events(num_batches: int, start_epoch: int, end_epoch: int, epochs: int, interval: int) -> tuple[int, int]:
-    if interval <= 0:
-        raise ValueError("prune_interval must be >= 1")
-    if start_epoch > end_epoch:
-        return 0, 0
-
-    active_epochs = max(0, min(end_epoch, epochs) - max(start_epoch, 1) + 1)
-    eligible_steps = active_epochs * num_batches
-    if eligible_steps == 0:
-        return 0, 0
-
-    events = (eligible_steps + interval - 1) // interval
-    return events, eligible_steps
+    return pruning_events(num_batches, start_epoch, end_epoch, epochs, interval)
 
 
 def train_once(
@@ -67,6 +57,11 @@ def train_once(
     prune_end_epoch: int,
     prune_interval: int,
 ):
+    if criterion not in ("magnitude", "saliency") or not (0.0 <= target_sparsity <= 1.0):
+        raise ValueError("Invalid criterion or target sparsity")
+    if batch_size < 1 or lr <= 0:
+        raise ValueError("batch size and learning rate must be positive")
+    pruning_events(1, prune_start_epoch, prune_end_epoch, epochs, prune_interval)
     set_seed(seed)
     data = load_mnist(seed=seed, val_size=5000)
 
@@ -88,17 +83,20 @@ def train_once(
             log_probs = log_softmax(logits, axis=1)
             loss = nll_loss(log_probs, yb)
             loss.backward()
-            optimizer.step()
-
-            if criterion != "none" and target_sparsity > 0.0 and prune_start_epoch <= epoch <= prune_end_epoch and total_events > 0:
+            scores = None
+            if target_sparsity > 0.0 and prune_start_epoch <= epoch <= prune_end_epoch:
                 eligible_seen += 1
                 should_prune = (eligible_seen % prune_interval == 0) or (eligible_seen == total_eligible)
-                if should_prune and events_done < total_events:
-                    events_done += 1
-                    target = cubic_sparsity(events_done, total_events, target_sparsity)
-                    apply_global_pruning_step(model.parameters(), criterion=criterion, target_sparsity=target)
+                if should_prune:
+                    scores = capture_importance(model.parameters(), criterion)
+            optimizer.step()
+            if scores is not None:
+                events_done += 1
+                target = cubic_sparsity(events_done, total_events, target_sparsity)
+                apply_global_pruning_step(model.parameters(), criterion=criterion, target_sparsity=target, scores=scores)
 
     train_time_s = float(time.time() - t0)
+    assert_pruning_budget(model.parameters(), target_sparsity)
 
     val_loss, val_acc = evaluate_model(model, data["x_val"], data["y_val"])
     test_loss, test_acc = evaluate_model(model, data["x_test"], data["y_test"])

@@ -25,6 +25,7 @@ def main() -> None:
         for row in reader:
             grouped[(row["criterion"], float(row["target_sparsity"]))].append(
                 {
+                    "seed": int(row["seed"]),
                     "achieved_sparsity": float(row["achieved_sparsity"]),
                     "test_acc": float(row["test_acc"]),
                     "val_acc": float(row["val_acc"]),
@@ -37,6 +38,8 @@ def main() -> None:
 
     summary_rows: list[dict[str, float | str | int]] = []
     for (criterion, target), rows in sorted(grouped.items(), key=lambda t: (t[0][0], t[0][1])):
+        if len({row["seed"] for row in rows}) != len(rows):
+            raise ValueError("Duplicate seed in criterion/target group")
         achieved = np.array([r["achieved_sparsity"] for r in rows], dtype=np.float64)
         test_acc = np.array([r["test_acc"] for r in rows], dtype=np.float64)
         val_acc = np.array([r["val_acc"] for r in rows], dtype=np.float64)
@@ -100,6 +103,22 @@ def main() -> None:
         return
 
     diff = float(sal["test_acc_mean"] - mag["test_acc_mean"])
+    magnitude_by_seed = {row["seed"]: row for row in grouped[("magnitude", claim_target)]}
+    saliency_by_seed = {row["seed"]: row for row in grouped[("saliency", claim_target)]}
+    if magnitude_by_seed.keys() != saliency_by_seed.keys():
+        raise ValueError("Paired comparison requires identical seed sets")
+    deltas = []
+    for seed in sorted(magnitude_by_seed):
+        magnitude = magnitude_by_seed[seed]
+        saliency = saliency_by_seed[seed]
+        if not np.isclose(magnitude["achieved_sparsity"], saliency["achieved_sparsity"], rtol=0, atol=1e-12):
+            raise ValueError("Paired comparison requires matched achieved sparsity")
+        delta = saliency["test_acc"] - magnitude["test_acc"]
+        deltas.append(delta)
+        print(f"paired_seed={seed} delta_accuracy={delta:.6f}")
+    sample_std = float(np.std(deltas, ddof=1)) if len(deltas) > 1 else float("nan")
+    print(f"paired_delta_mean={np.mean(deltas):.6f} paired_delta_sample_std={sample_std:.6f}")
+    print("uncertainty=descriptive_seed_variation_not_a_universal_superiority_claim; summary_std=population_ddof_0")
     print(
         "claim="
         f"at_target_{claim_target:.2f}, saliency_test_acc_mean={sal['test_acc_mean']:.4f}, "

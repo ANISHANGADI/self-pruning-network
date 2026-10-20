@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from engine.tensor import Tensor, log_softmax, nll_loss
 
@@ -219,3 +220,66 @@ def test_sum_axis_keepdims_gradcheck():
     fn_x = lambda v: v.sum(axis=2, keepdims=True).sum()
     nx = numerical_grad_scalar(fn_x, x_data.copy())
     assert_close(x.grad, nx)
+
+
+@pytest.mark.parametrize("operation", [
+    lambda value, other: value - other,
+    lambda value, other: other - value,
+    lambda value, other: value / other,
+    lambda value, other: other / value,
+])
+def test_binary_arithmetic_gradcheck(operation):
+    values = np.array([[0.8, 1.2, 2.0], [1.5, 0.7, 3.0]])
+    other_values = np.array([1.1, 2.3, 0.9])
+    upstream = np.array([[1.0, -2.0, 0.5], [0.3, 1.7, -0.8]])
+    value = Tensor(values.copy(), requires_grad=True)
+    other = Tensor(other_values.copy(), requires_grad=True)
+    operation(value, other).backward(upstream)
+    assert_close(value.grad, numerical_grad_scalar(lambda data: (operation(data, other_values) * upstream).sum(), values.copy()))
+    assert_close(other.grad, numerical_grad_scalar(lambda data: (operation(values, data) * upstream).sum(), other_values.copy()))
+
+
+@pytest.mark.parametrize("operation", [lambda value: -value, lambda value: 2.0 - value, lambda value: 2.0 / value, lambda value: 2.0 + value, lambda value: 2.0 * value])
+def test_unary_and_reflected_arithmetic_gradcheck(operation):
+    values = np.array([0.7, 1.5, 2.1])
+    upstream = np.array([1.0, -2.0, 0.5])
+    value = Tensor(values.copy(), requires_grad=True)
+    operation(value).backward(upstream)
+    assert_close(value.grad, numerical_grad_scalar(lambda data: (operation(data) * upstream).sum(), values.copy()))
+
+
+def test_log_softmax_numerical_gradients():
+    values = np.array([[1.2, -0.5, 0.3], [-0.7, 0.2, 1.4]])
+    upstream = np.array([[0.3, -0.8, 1.1], [0.7, 0.4, -0.2]])
+    value = Tensor(values.copy(), requires_grad=True)
+    log_softmax(value).backward(upstream)
+    def objective(data):
+        shifted = data - data.max(axis=1, keepdims=True)
+        return ((shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))) * upstream).sum()
+    assert_close(value.grad, numerical_grad_scalar(objective, values.copy()))
+
+
+def test_nll_and_cross_entropy_numerical_gradients():
+    values = np.array([[1.2, -0.5, 0.3], [-0.7, 0.2, 1.4]])
+    targets = np.array([2, 0])
+    for combined in [False, True]:
+        value = Tensor(values.copy(), requires_grad=True)
+        nll_loss(log_softmax(value) if combined else value, targets).backward()
+        def objective(data):
+            if combined:
+                shifted = data - data.max(axis=1, keepdims=True)
+                data = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
+            return -data[np.arange(2), targets].mean()
+        assert_close(value.grad, numerical_grad_scalar(objective, values.copy()))
+
+
+@pytest.mark.parametrize("axis", [None, -1, (0, -1)])
+@pytest.mark.parametrize("keepdims", [False, True])
+@pytest.mark.parametrize("reduction", ["sum", "mean"])
+def test_reduction_variants_gradcheck(axis, keepdims, reduction):
+    values = np.random.default_rng(23).normal(size=(2, 3, 4))
+    value = Tensor(values.copy(), requires_grad=True)
+    result = getattr(value, reduction)(axis=axis, keepdims=keepdims)
+    upstream = np.random.default_rng(24).normal(size=result.shape)
+    result.backward(upstream)
+    assert_close(value.grad, numerical_grad_scalar(lambda data: (getattr(data, reduction)(axis=axis, keepdims=keepdims) * upstream).sum(), values.copy()))
