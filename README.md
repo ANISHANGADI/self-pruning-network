@@ -1,75 +1,91 @@
-# Self-Pruning Network (NumPy + custom autodiff)
+# Self-Pruning Network
 
-This repository implements a neural network and pruning pipeline from scratch in Python + NumPy.
+A Python and NumPy implementation of reverse-mode autodiff, a composable MLP,
+mask-aware Adam, and gradual global unstructured pruning on MNIST. The experiments
+compare magnitude pruning (`|w|`) with first-order saliency (`|w * grad|`) under
+a cubic sparsity schedule and a hard connection budget.
 
-## Important restrictions
-- `scikit-learn` is used only for dataset loading and splitting.
-- No PyTorch/TensorFlow/JAX/Keras/autodiff libraries are used for model training or gradients.
-- Backpropagation, optimizer, pruning logic, and training loop are custom code.
+Scikit-learn is used **only to load MNIST**. Gradients, optimization, pruning,
+data splitting, and training are implemented without neural-network or autodiff
+frameworks. See [DESIGN.md](DESIGN.md) for derivations and implementation decisions.
 
-## Project status
-- [x] Phase 1 started: reverse-mode autodiff engine and gradient checks
-- [x] Phase 2: mask semantics + optimizer correctness tests
-- [x] Phase 3: MLP + Adam + dense training baseline
-- [x] Phase 4: self-pruning criteria and schedules
-- [x] Phase 5: Pareto evidence, sparse compute evidence, and falsifiable claim
+## Quick Start
 
-## Phase 3 baseline (MNIST)
-- Architecture: `784 -> 256 -> 128 -> 10` with ReLU hidden layers
-- Initialization: He-normal for linear weights, zero bias
-- Optimizer: custom Adam
-- Seed: `7`
-- 5-epoch dense baseline result: `test_acc = 0.9777`, `test_loss = 0.0702`
-
-### Reproduce baseline
-```bash
-python3 -m pytest -q
-python3 scripts/train_dense_baseline.py --epochs 5 --batch-size 128 --lr 0.001 --seed 7 --out-csv results/dense_learning_curve_seed7.csv
-python3 scripts/plot_learning_curve.py --csv results/dense_learning_curve_seed7.csv --out plots/dense_learning_curve_seed7.png
-```
-
-Notes:
-- `fetch_openml` is configured with `parser="liac-arff"` to avoid a hard pandas dependency.
-- Matrix multiplications explicitly validate finite outputs and gradients to catch true numerical failures.
-
-## Phase 4 gradual self-pruning
-- Criteria implemented: `magnitude` and `saliency` (|w * grad|)
-- Schedule implemented: gradual cubic sparsity ramp with global mask updates
-- Logging: epoch-wise sparsity, active parameter count, and pruned connections
-
-### Reproduce self-pruning training
-```bash
-python3 -m pytest -q
-python3 scripts/train_self_pruning.py --criterion saliency --target-sparsity 0.90 --epochs 12 --prune-start-epoch 2 --prune-end-epoch 10 --prune-interval 100 --out-csv results/self_pruning_learning_curve_seed7.csv
-```
-
-## Phase 5 evidence pipeline
-Run a sweep across sparsity targets, criteria, and seeds:
+Requires Python 3.10+. Python 3.11 was used for the reference experiments.
 
 ```bash
-python3 scripts/run_pruning_sweep.py --seeds 7,13,21 --targets 0.0,0.5,0.75,0.9,0.95 --criteria magnitude,saliency --epochs 8 --batch-size 128 --lr 0.001 --prune-start-epoch 2 --prune-end-epoch 7 --prune-interval 100 --out results/pruning_sweep.csv
+git clone https://github.com/ANISHANGADI/self-pruning-network.git
+cd self-pruning-network
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest -q
 ```
 
-Generate plots and summary table:
+Use `python3` if needed. On Windows PowerShell, activate with
+`.venv\Scripts\Activate.ps1`. To reproduce the reference Python 3.11 dependency
+versions, install [requirements-lock.txt](requirements-lock.txt) instead.
+The first training run downloads MNIST and requires internet access.
 
+## Reproduce Experiments
+
+The default MLP is `784 -> 256 -> 128 -> 10`, with ReLU hidden layers,
+He-normal weights, zero biases, and Adam at learning rate `0.001`.
+
+Dense baseline and learning curve (5 epochs, seed 7):
 ```bash
-python3 scripts/plot_pareto.py --csv results/pruning_sweep.csv --out plots/sparsity_accuracy_pareto.png
-python3 scripts/summarize_sweep.py --csv results/pruning_sweep.csv --out results/pruning_summary.csv --claim-sparsity 0.9
+python scripts/train_dense_baseline.py --epochs 5 --seed 7 --out-csv results/dense_learning_curve_seed7.csv
+python scripts/plot_learning_curve.py --csv results/dense_learning_curve_seed7.csv --out plots/dense_learning_curve_seed7.png
 ```
 
-Evidence fields written by the sweep include:
-- achieved sparsity and test accuracy per seed
-- active parameter count vs dense parameter count
-- dense MACs per example vs sparse MACs per example
-- dense forward latency vs sparse-aware forward latency
+Single gradual-pruning run with epoch-level metrics:
+```bash
+python scripts/train_self_pruning.py --criterion saliency --target-sparsity 0.90 --epochs 12 --prune-start-epoch 2 --prune-end-epoch 10 --prune-interval 100
+```
 
-Generated artifacts (committed):
-- `results/pruning_sweep.csv`
-- `results/pruning_summary.csv`
-- `plots/sparsity_accuracy_pareto.png`
+Matched 8-epoch sweep, Pareto plot, and summary:
+```bash
+python scripts/run_pruning_sweep.py --seeds 7,13,21 --targets 0.0,0.5,0.75,0.9,0.95 --criteria magnitude,saliency --epochs 8 --batch-size 128 --lr 0.001 --prune-start-epoch 2 --prune-end-epoch 7 --prune-interval 100 --out results/pruning_sweep.csv
+python scripts/plot_pareto.py --csv results/pruning_sweep.csv --out plots/sparsity_accuracy_pareto.png
+python scripts/summarize_sweep.py --csv results/pruning_sweep.csv --out results/pruning_summary.csv --claim-sparsity 0.9
+```
 
-Falsifiable claim (from `results/pruning_summary.csv`):
-- At target sparsity `0.90` (3 seeds), magnitude pruning reached mean test accuracy `0.9817 ± 0.0002`, while saliency pruning reached `0.9751 ± 0.0007`; delta (saliency - magnitude) is `-0.0066`.
+These commands overwrite the corresponding outputs; use different output paths
+to preserve the reference results.
 
-Note:
-- The sparse-aware forward path in this repository is an explicit NumPy implementation used for honest work accounting. It may reduce MACs and active parameters while still being slower wall-clock than dense BLAS matmul at this scale.
+## Results
+
+Mean test accuracy across seeds `7,13,21`, using the matched 8-epoch sweep:
+
+| Model | Active connections | Test accuracy |
+| --- | ---: | ---: |
+| Dense | 234,752 | 97.9133% |
+| Magnitude, 90% target sparsity | 23,475 | 98.0967% |
+| Saliency, 90% target sparsity | 23,475 | 97.4433% |
+
+**Falsifiable claim:** at 90% target sparsity, magnitude pruning outperformed
+this saliency implementation by **0.6533 percentage points** on average across
+these three seeds. All three paired runs favored magnitude; this does not
+establish a universal ranking. Error bars show population standard deviation,
+not confidence intervals.
+
+![Sparsity versus test accuracy](plots/sparsity_accuracy_pareto.png)
+
+Evidence: [raw sweep](results/pruning_sweep.csv),
+[summary](results/pruning_summary.csv),
+[dense learning curve](plots/dense_learning_curve_seed7.png), and
+[baseline metrics](results/dense_learning_curve_seed7.csv).
+The separate 5-epoch baseline is not the matched comparator in the table.
+
+## Limitations
+
+- At 90% sparsity, sparse-aware inference uses about 10% of dense connection
+	MACs but is **13.07x slower** for magnitude and **12.57x slower** for saliency
+	than dense NumPy inference in the reference measurements. No latency speedup
+	is claimed; timing methodology and environment are documented in [DESIGN.md](DESIGN.md).
+- Training/evaluation use dense masked matrices. Arrays remain dense in memory;
+	active-weight reductions do not imply reduced allocated storage. Counts exclude biases.
+- Pruning does not automatically regrow connections. Adam's tested revival
+	policy resets moments while retaining its global step counter.
+- Results cover one dataset and three seeds. Timings and numerical results can
+	vary across hardware and dependencies. Model checkpoints are not saved.
